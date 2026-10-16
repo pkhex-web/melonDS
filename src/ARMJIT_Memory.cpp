@@ -897,6 +897,10 @@ ARMJIT_Memory::ARMJIT_Memory(melonDS::NDS& nds) : NDS(nds)
         // old Windows version
         MemoryBase = new u8[MemoryTotalSize];
     }
+#elif defined(__APPLE__)
+    // Apple platforms have no fastmem, so nothing maps the memory twice. iOS also gives apps little address space and
+    // may refuse shm_open.
+    MemoryBase = (u8*)mmap(nullptr, MemoryTotalSize, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
 #else
     MemoryBase = (u8*)mmap(nullptr, VirtmemAreaSize, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
 
@@ -984,7 +988,11 @@ ARMJIT_Memory::~ARMJIT_Memory() noexcept
 #else
     if (MemoryBase)
     {
+#ifdef __APPLE__
+        munmap(MemoryBase, MemoryTotalSize);
+#else
         munmap(MemoryBase, VirtmemAreaSize);
+#endif
         MemoryBase = nullptr;
         FastMem9Start = nullptr;
         FastMem7Start = nullptr;

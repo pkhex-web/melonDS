@@ -46,6 +46,13 @@
 #include "Platform.h"
 #include "ARMJIT_x64/ARMJIT_Offsets.h"
 
+#ifndef _WIN32
+#include <sys/mman.h>
+#endif
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 namespace melonDS
 {
 using Platform::Log;
@@ -1158,7 +1165,19 @@ void ARMJIT::ResetBlockCache() noexcept
 
 void ARMJIT::JitEnableWrite() noexcept
 {
-    #if defined(__APPLE__) && defined(__aarch64__)
+    switch (ARMJIT_Global::GetCodeMemoryMode())
+    {
+    case ARMJIT_Global::CodeMemoryMode::DualMap:
+        return;
+    case ARMJIT_Global::CodeMemoryMode::WXToggle:
+#ifndef _WIN32
+        mprotect(JITCompiler.CodeMemBase, ARMJIT_Global::CodeMemorySliceSize, PROT_READ | PROT_WRITE);
+#endif
+        return;
+    case ARMJIT_Global::CodeMemoryMode::Own:
+        break;
+    }
+    #if defined(__APPLE__) && defined(__aarch64__) && TARGET_OS_OSX
         if (__builtin_available(macOS 11.0, *))
             pthread_jit_write_protect_np(false);
     #elif defined(__NetBSD__)
@@ -1168,12 +1187,23 @@ void ARMJIT::JitEnableWrite() noexcept
 
 void ARMJIT::JitEnableExecute() noexcept
 {
-    #if defined(__APPLE__) && defined(__aarch64__)
+    switch (ARMJIT_Global::GetCodeMemoryMode())
+    {
+    case ARMJIT_Global::CodeMemoryMode::DualMap:
+        return;
+    case ARMJIT_Global::CodeMemoryMode::WXToggle:
+#ifndef _WIN32
+        mprotect(JITCompiler.CodeMemBase, ARMJIT_Global::CodeMemorySliceSize, PROT_READ | PROT_EXEC);
+#endif
+        return;
+    case ARMJIT_Global::CodeMemoryMode::Own:
+        break;
+    }
+    #if defined(__APPLE__) && defined(__aarch64__) && TARGET_OS_OSX
         if (__builtin_available(macOS 11.0, *))
             pthread_jit_write_protect_np(true);
     #elif defined(__NetBSD__)
         mprotect(JITCompiler.CodeMemBase, ARMJIT_Global::CodeMemorySliceSize, PROT_READ | PROT_EXEC);
     #endif
 }
-
 }

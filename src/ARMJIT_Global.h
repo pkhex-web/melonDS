@@ -34,7 +34,22 @@ static constexpr size_t CodeMemorySliceSize = 1024*1024*32;
 void Init();
 void DeInit();
 
-void* AllocateCodeMem();
+enum class CodeMemoryMode
+{
+    Own,
+    WXToggle,
+    DualMap,
+};
+
+// Where only the frontend can get executable memory, as on iOS, it hands out the code memory.
+// rx and rw are the same for WXToggle. The allocator returns false when it has none, and the JIT must stay off.
+using CodeMemoryAllocator = bool (*)(size_t size, void** rx, void** rw);
+using CodeMemoryFreer = void (*)(void* rx);
+void SetCodeMemoryAllocator(CodeMemoryMode mode, CodeMemoryAllocator allocate, CodeMemoryFreer free);
+CodeMemoryMode GetCodeMemoryMode();
+
+// Returns the address to run code from. rw, when given, receives the address to write it through.
+void* AllocateCodeMem(void** rw = nullptr);
 void FreeCodeMem(void* codeMem);
 
 }

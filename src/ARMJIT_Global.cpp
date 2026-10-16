@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include <mutex>
+#include <vector>
 
 namespace melonDS
 {
@@ -42,10 +43,44 @@ u8* GetAlignedCodeMemoryStart()
 
 int RefCounter = 0;
 
-void* AllocateCodeMem()
+CodeMemoryMode Mode = CodeMemoryMode::Own;
+CodeMemoryAllocator FrontendAllocate = nullptr;
+CodeMemoryFreer FrontendFree = nullptr;
+std::vector<void*> WritableOnly;
+
+void SetCodeMemoryAllocator(CodeMemoryMode mode, CodeMemoryAllocator allocate, CodeMemoryFreer free)
 {
     std::lock_guard guard(globalMutex);
+    Mode = mode;
+    FrontendAllocate = allocate;
+    FrontendFree = free;
+}
 
+CodeMemoryMode GetCodeMemoryMode()
+{
+    return Mode;
+}
+
+// The compiler writes its trampolines even when the JIT is off, so a console without executable memory still needs
+// somewhere to put them. Nothing runs from here.
+static void* AllocateWritableOnly(void** rw)
+{
+#ifdef _WIN32
+    void* mem = VirtualAlloc(nullptr, CodeMemorySliceSize, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* mem = mmap(nullptr, CodeMemorySliceSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED)
+        mem = nullptr;
+#endif
+    if (mem)
+        WritableOnly.push_back(mem);
+    if (rw)
+        *rw = mem;
+    return mem;
+}
+
+static void* AllocateOwnCodeMem()
+{
 #if !defined(APPLE_AARCH64) && !defined(__NetBSD__) && !defined(__OpenBSD__)
     if (AvailableCodeMemSlices)
     {
@@ -60,7 +95,8 @@ void* AllocateCodeMem()
 #ifdef _WIN32
     return VirtualAlloc(nullptr, CodeMemorySliceSize, MEM_RESERVE|MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 #elif defined(APPLE_AARCH64)
-    return mmap(NULL, CodeMemorySliceSize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT,-1, 0);
+    void* mem = mmap(NULL, CodeMemorySliceSize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT,-1, 0);
+    return mem == MAP_FAILED ? nullptr : mem;
 #elif defined(__NetBSD__)
     return mmap(nullptr, CodeMemorySliceSize, PROT_MPROTECT(PROT_READ | PROT_WRITE | PROT_EXEC), MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 #else
@@ -69,9 +105,54 @@ void* AllocateCodeMem()
 #endif
 }
 
+void* AllocateCodeMem(void** rw)
+{
+    std::lock_guard guard(globalMutex);
+
+    if (FrontendAllocate)
+    {
+        void* rx = nullptr;
+        void* frontendRw = nullptr;
+        if (FrontendAllocate(CodeMemorySliceSize, &rx, &frontendRw))
+        {
+            if (rw)
+                *rw = frontendRw;
+            return rx;
+        }
+        return AllocateWritableOnly(rw);
+    }
+
+    void* mem = AllocateOwnCodeMem();
+    if (!mem)
+        return AllocateWritableOnly(rw);
+    if (rw)
+        *rw = mem;
+    return mem;
+}
+
 void FreeCodeMem(void* codeMem)
 {
     std::lock_guard guard(globalMutex);
+
+    for (auto it = WritableOnly.begin(); it != WritableOnly.end(); it++)
+    {
+        if (*it == codeMem)
+        {
+            WritableOnly.erase(it);
+#ifdef _WIN32
+            VirtualFree(codeMem, 0, MEM_RELEASE);
+#else
+            munmap(codeMem, CodeMemorySliceSize);
+#endif
+            return;
+        }
+    }
+
+    if (FrontendFree)
+    {
+        FrontendFree(codeMem);
+        return;
+    }
 
 #if !defined(APPLE_AARCH64) && !defined(__NetBSD__) && !defined(__OpenBSD__)
     for (int i = 0; i < NumCodeMemSlices; i++)
